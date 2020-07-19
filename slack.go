@@ -6,19 +6,36 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 var webhook = "https://hooks.slack.com/services/"
 
-type message struct {
-	Text string `json:"text"`
+const markdown = "mrkdwn"
+
+type payload []interface{}
+
+type section struct {
+	Text        text   `json:"text"`
+	MessageType string `json:"type"`
 }
 
-func sendMessage(msg, token string) error {
-	log.Printf("sending message: %s", msg)
-	m := message{Text: msg}
+type text struct {
+	Text           string `json:"text"`
+	FormattingType string
+}
+
+type footer struct {
+	MessageType string `json:"type"`
+	Elements    []text `json:"elements"`
+}
+
+func sendMessage(msg payload, token string, dryRun bool) error {
+	log.Printf("sending message")
+
 	buf := new(bytes.Buffer)
-	if err := json.NewEncoder(buf).Encode(&m); err != nil {
+	if err := json.NewEncoder(buf).Encode(&msg); err != nil {
 		return fmt.Errorf("failed to encode message: %v", err)
 	}
 
@@ -29,6 +46,11 @@ func sendMessage(msg, token string) error {
 	}
 
 	req.Header.Add("Content-Type", "application/json")
+
+	if dryRun {
+		log.Println("skipping Slack message")
+		return nil
+	}
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -43,4 +65,39 @@ func sendMessage(msg, token string) error {
 	log.Printf("slack response: %v", buf.String())
 
 	return nil
+}
+
+func makeMessage(u userFile) payload {
+	msg := makeMessageString(u.username, u.filenames)
+	body := section{
+		MessageType: "section",
+		Text: text{
+			Text:           msg,
+			FormattingType: markdown,
+		},
+	}
+	f := footer{
+		MessageType: "context",
+		Elements: []text{
+			{
+				FormattingType: markdown,
+				Text:           fmt.Sprintf("<https://drive.google.com/drive/u/0/folders/%s|Se utleggene til %v i utleggsmappen>", u.username, u.id),
+			},
+		},
+	}
+	return payload{body, f}
+}
+
+func makeMessageString(name string, files []string) string {
+	msg := strings.Builder{}
+	msg.WriteString(name)
+	msg.WriteString(" har lastet opp ")
+	msg.WriteString(strconv.Itoa(len(files)))
+	msg.WriteString(" nye utlegg:\n")
+	for _, f := range files {
+		msg.WriteString(" * ")
+		msg.WriteString(f)
+		msg.WriteString("\n")
+	}
+	return msg.String()
 }

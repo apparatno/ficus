@@ -1,10 +1,10 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"time"
 
 	"golang.org/x/net/context"
@@ -12,76 +12,136 @@ import (
 	"google.golang.org/api/option"
 )
 
+type userFile struct {
+	filenames []string
+	username  string
+	id        folderID
+}
+
 func main() {
+	var did string
+	var rid string
+	var dbPath string
+	var dryRun bool
+
+	flag.StringVar(&did, "driveid", "", "ID of the Google Drive to use")
+	flag.StringVar(&rid, "root", "", "ID of the folder to scan")
+	flag.StringVar(&dbPath, "db", "db.json", "path to database JSON file. Defaults to ./db.json")
+	flag.BoolVar(&dryRun, "no-slack", false, "don't send Slack messages")
+
+	flag.Parse()
+
 	token := os.Getenv("FICUS_SLACK_TOKEN")
-	if token == "" {
+	if token == "" && dryRun == false {
 		log.Fatal("missing env var 'FICUS_SLACK_TOKEN'")
 	}
 
-	driveID := os.Getenv("FICUS_DRIVE_ID")
-	if driveID == "" {
-		log.Fatal("missing env var FICUS_DRIVE_ID")
-	}
+	driveID := folderID(did)
+	rootID := folderID(rid)
 
 	srv, err := drive.NewService(context.Background(), option.WithCredentialsFile("credentials.json"))
 	if err != nil {
-		log.Fatalf("Unable to retrieve Drive client: %v", err)
+		log.Fatalf("unable to retrieve Drive client: %v", err)
 	}
 
-	for {
-		if err = run(srv, driveID, token); err != nil {
-			log.Fatal(err)
-		}
-		time.Sleep(10 * time.Minute)
+	folders, err := getFolders(srv, driveID, rootID)
+	if err != nil {
+		log.Fatalf("failed to list folders from root folder: %v", err)
 	}
+
+	db, err := load(dbPath)
+	if err != nil {
+		log.Fatalf("failed to read data from database: %v", err)
+	}
+
+	changes, err := makeFileLists(srv, driveID, folders, db)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, u := range changes {
+		msg := makeMessage(u)
+		if err := sendMessage(msg, token, dryRun); err != nil {
+			log.Fatalf("failed to send Slack message: %v", err)
+		}
+	}
+
+	db = updateDB(db, changes)
+
+	if err := save(dbPath, db); err != nil {
+		log.Fatalf("failed to save database: %v", err)
+	}
+
+	log.Println("update completed")
 }
 
-func run(srv *drive.Service, driveID, token string) error {
-	folders, err := load()
+func getFolders(srv *drive.Service, driveID folderID, root folderID) ([]folderID, error) {
+	var res []folderID
+
+	r, err := srv.Files.
+		List().
+		TeamDriveId(string(driveID)).
+		SupportsTeamDrives(true).
+		IncludeTeamDriveItems(true).
+		Corpora("drive").
+		Q(fmt.Sprintf("'%s' in parents", root)).
+		PageSize(10).
+		Fields("nextPageToken, files(id, name, createdTime)").
+		Do()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	for i, folder := range folders {
-		log.Printf("handling %s", folder.User)
-		files, err := listFolder(srv, driveID, folder.ID)
+	for _, f := range r.Files {
+		log.Printf("%s (%s)", f.Name, f.Id)
+		res = append(res, folderID(f.Id))
+	}
+
+	log.Printf("found files: %v", res)
+
+	return res, nil
+}
+
+func makeFileLists(srv *drive.Service, driveID folderID, folders []folderID, db map[folderID]folder) ([]userFile, error) {
+	var res []userFile
+
+	for _, fid := range folders {
+		userFolder, ok := db[fid]
+		if !ok {
+			userFolder = folder{}
+		}
+
+		log.Printf("handling %s", userFolder.User)
+		files, err := listFolder(srv, driveID, fid)
 		if err != nil {
-			return err
+			log.Printf("failed to list files for user %s (%v)", userFolder.User, err)
+			continue
 		}
 		if len(files) == 0 {
 			continue
 		}
 
-		newFiles := mapFiles(files, folder)
+		newFiles := mapFiles(files, userFolder)
 		if len(newFiles) == 0 {
 			log.Println("no new files")
 			continue
 		}
 		log.Printf("found %d files to report", len(newFiles))
 
-		msg := makeMessage(folder.User, newFiles)
-
-		if err = sendMessage(msg, token); err != nil {
-			return err
-		}
-
-		folders[i].UpdatedAt = time.Now()
-
-		log.Printf("completed %s", folder.User)
+		res = append(res, userFile{
+			id:        fid,
+			filenames: newFiles,
+			username:  userFolder.User,
+		})
 	}
 
-	if err = save(folders); err != nil {
-		return err
-	}
-	log.Printf("done")
-
-	return nil
+	return res, nil
 }
 
-func listFolder(srv *drive.Service, driveID, id string) ([]*drive.File, error) {
+func listFolder(srv *drive.Service, driveID, id folderID) ([]*drive.File, error) {
 	r, err := srv.Files.
 		List().
-		TeamDriveId(driveID).
+		TeamDriveId(string(driveID)).
 		SupportsTeamDrives(true).
 		IncludeTeamDriveItems(true).
 		Corpora("drive").
@@ -114,16 +174,4 @@ func mapFiles(files []*drive.File, folder folder) []string {
 	}
 
 	return newFiles
-}
-
-func makeMessage(name string, files []string) string {
-	msg := strings.Builder{}
-	msg.WriteString(name)
-	msg.WriteString(" har lastet opp nye utlegg:\n")
-	for _, f := range files {
-		msg.WriteString(" * ")
-		msg.WriteString(f)
-		msg.WriteString("\n")
-	}
-	return msg.String()
 }
