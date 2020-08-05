@@ -39,7 +39,7 @@ Usage of ficus:
 For å autentisere mot Slack må du i tillegg eksportere Slack token
 som `FICUS_SLACK_TOKEN`.
 Det er mulig å skippe Slack ved å bruke `-no-slack`
-(fortrinsvis for testformål).s
+(fortrinsvis for testformål).
 
 ### Databasen
 

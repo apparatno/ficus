@@ -10,12 +10,13 @@ import (
 
 type folderID string
 type folder struct {
+	ID        folderID  `json:"id"`
 	User      string    `json:"user"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 func load(path string) (map[folderID]folder, error) {
-	var res map[folderID]folder
+	res := make(map[folderID]folder)
 	f, err := os.Open(path)
 	if err != nil {
 		log.Println("no database file found, creating empty database")

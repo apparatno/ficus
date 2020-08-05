@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/net/context"
@@ -53,6 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to read data from database: %v", err)
 	}
+	log.Printf("database %v", db)
 
 	changes, err := makeFileLists(srv, driveID, folders, db)
 	if err != nil {
@@ -75,8 +77,8 @@ func main() {
 	log.Println("update completed")
 }
 
-func getFolders(srv *drive.Service, driveID folderID, root folderID) ([]folderID, error) {
-	var res []folderID
+func getFolders(srv *drive.Service, driveID folderID, root folderID) ([]folder, error) {
+	var res []folder
 
 	r, err := srv.Files.
 		List().
@@ -85,7 +87,7 @@ func getFolders(srv *drive.Service, driveID folderID, root folderID) ([]folderID
 		IncludeTeamDriveItems(true).
 		Corpora("drive").
 		Q(fmt.Sprintf("'%s' in parents", root)).
-		PageSize(10).
+		PageSize(100).
 		Fields("nextPageToken, files(id, name, createdTime)").
 		Do()
 	if err != nil {
@@ -93,26 +95,30 @@ func getFolders(srv *drive.Service, driveID folderID, root folderID) ([]folderID
 	}
 
 	for _, f := range r.Files {
+		if strings.HasPrefix(f.Name, "xxx") || strings.Contains(f.Name, "README") {
+			continue
+		}
+
 		log.Printf("%s (%s)", f.Name, f.Id)
-		res = append(res, folderID(f.Id))
+		res = append(res, folder{ID: folderID(f.Id), User: f.Name})
 	}
 
-	log.Printf("found files: %v", res)
+	log.Printf("found %d files", len(res))
 
 	return res, nil
 }
 
-func makeFileLists(srv *drive.Service, driveID folderID, folders []folderID, db map[folderID]folder) ([]userFile, error) {
+func makeFileLists(srv *drive.Service, driveID folderID, folders []folder, db map[folderID]folder) ([]userFile, error) {
 	var res []userFile
 
-	for _, fid := range folders {
-		userFolder, ok := db[fid]
+	for _, f := range folders {
+		userFolder, ok := db[f.ID]
 		if !ok {
-			userFolder = folder{}
+			userFolder = f
 		}
 
 		log.Printf("handling %s", userFolder.User)
-		files, err := listFolder(srv, driveID, fid)
+		files, err := listFolder(srv, driveID, f.ID)
 		if err != nil {
 			log.Printf("failed to list files for user %s (%v)", userFolder.User, err)
 			continue
@@ -129,7 +135,7 @@ func makeFileLists(srv *drive.Service, driveID folderID, folders []folderID, db 
 		log.Printf("found %d files to report", len(newFiles))
 
 		res = append(res, userFile{
-			id:        fid,
+			id:        f.ID,
 			filenames: newFiles,
 			username:  userFolder.User,
 		})
